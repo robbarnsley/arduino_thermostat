@@ -3,17 +3,21 @@
 
 #define ONE_WIRE_BUS 4 
 #define USE_SERIAL_FOR_TEMPERATURE_SERVO true
+#define PIN_RELAY_IN1 2
+#define PIN_RELAY_IN2 3
+#define PIN_POT 5
+#define PIN_LED 8
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-boolean isHeaterOn = false, isHeaterOnLast = false, turnHeaterOn = false;
-float T_DMD = 0.;
+boolean isHeaterOn, isHeaterOnLast, turnHeaterOn;
+float T_DMD;
 int TEMPERATURE_ALARM_LO = 10;
 int TEMPERATURE_ALARM_HI = 28;
-int STATE_CHANGE_DELAY = 60;    // how often to allow a heater state change (s), watch out for overflow
-
-long lastSampleTime = 0L - STATE_CHANGE_DELAY;
+int POLLING_DELAY = 60;    // how often to poll the sensors and check for a heater state change
+long lastSampleTime;
+float T[4];
 
 boolean IsNumeric(String str, boolean allowDecimal = false) {
   for(char i = 0; i < str.length(); i++) {
@@ -24,38 +28,43 @@ boolean IsNumeric(String str, boolean allowDecimal = false) {
   return true;
 }
 
-String readSerialInput() {
+String readSerialInput(float timeout=1) {
   String msg;
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    msg+=c;
+  unsigned long start = millis();
+  while (millis()-start < (timeout*1000)) {
+    while (Serial.available() > 0) {
+      char c = Serial.read();
+      if (c=='\n') {
+        Serial.flush();
+        return msg;
+      } else {
+        msg+=c;
+      }
+    }
   }
-  return msg;
+  Serial.flush();
+  return "";
 }
 
 void setup() {
   Serial.begin(9600);
-  pinMode(2, OUTPUT);    // relay in1 
-  pinMode(3, OUTPUT);    // relay in2
-  pinMode(5, OUTPUT);    // pot 5v
-  pinMode(8, OUTPUT);    // led
+  pinMode(PIN_RELAY_IN1, OUTPUT);
+  pinMode(PIN_RELAY_IN2, OUTPUT);
+  pinMode(PIN_POT, OUTPUT);   
+  pinMode(PIN_LED, OUTPUT);
   
   digitalWrite(5, HIGH);
+  
+  T[0] = 0; T[1] = 0; T[2] = 0; T[3] = 0;
+  isHeaterOn = false;
+  isHeaterOnLast = false;
+  turnHeaterOn = false;
+  lastSampleTime = 0L - POLLING_DELAY;
   
   sensors.begin();
 }
 
 void loop() {
-  // get temperature (ACT)
-  sensors.requestTemperatures();
-  
-  float T[4];
-  T[0] = sensors.getTempCByIndex(0);  
-  T[1] = sensors.getTempCByIndex(1);  
-  T[2] = sensors.getTempCByIndex(2);  
-  T[3] = sensors.getTempCByIndex(3);   
-  float T_ACT = (T[0] + T[1] + T[2] + T[3])/4.;
-  
   // ascertain what the demand temperature is and set a demand (DMD) temperature
   turnHeaterOn = false;
   if (!USE_SERIAL_FOR_TEMPERATURE_SERVO) {                     // find DMD temperature using the potentiometer
@@ -75,7 +84,7 @@ void loop() {
       }
     } else if (msg.indexOf("GETSETPO?") >= 0) {                // - get setpoint
       Serial.println(T_DMD);
-    } else if (msg.indexOf("GETTEMPC") >= 0) {                 // - get temperature
+    } else if (msg.indexOf("GETTEMPC?") >= 0) {                // - get temperature
       if (IsNumeric(msg.substring(9))) {
         int index = msg.substring(9).toInt();
         Serial.println(T[index]);
@@ -95,31 +104,40 @@ void loop() {
     } else if (msg.indexOf("ISHEATON?") >= 0) {                // - is heater on?
       Serial.println(isHeaterOn);
     } else if (msg.indexOf("NEXTSTAT?") >= 0) {                // - when is the next state change due? (ms)
-      Serial.println(((STATE_CHANGE_DELAY)-((millis()/1000L) - lastSampleTime)));
+      Serial.println(((POLLING_DELAY)-((millis()/1000L) - lastSampleTime)));
     } 
   }
-  
-  // set the flag to turn the heater on if demand temperature is greater than actual
-  if ((T_ACT > TEMPERATURE_ALARM_LO) && (T_ACT < TEMPERATURE_ALARM_HI)) {
-    turnHeaterOn = T_DMD - T_ACT > 0 ? true : false;           // check if we need to turn the heater on
-  }
-  
-  // take action if state change is allowed
-  if (((millis()/1000L) - lastSampleTime) >= STATE_CHANGE_DELAY) {
+
+  // take action if it's time to poll
+  if (((millis()/1000L) - lastSampleTime) >= POLLING_DELAY) {
+    // get temperature (ACT)
+    sensors.requestTemperatures();
+    T[0] = sensors.getTempCByIndex(0);  
+    T[1] = sensors.getTempCByIndex(1);  
+    T[2] = sensors.getTempCByIndex(2);  
+    T[3] = sensors.getTempCByIndex(3);   
+    float T_ACT = (T[0] + T[1] + T[2] + T[3])/4.;
+    
+    // set the flag to turn the heater on if demand temperature is greater than actual
+    if ((T_ACT > TEMPERATURE_ALARM_LO) && (T_ACT < TEMPERATURE_ALARM_HI)) {   
+      turnHeaterOn = T_DMD - T_ACT > 0 ? true : false;             // check if we need to turn the heater on
+    }
+     
     if (turnHeaterOn && !isHeaterOnLast) {                         // turn heater on, when currently off
-      digitalWrite(8, HIGH);
-      digitalWrite(2, HIGH);
-      digitalWrite(3, HIGH);
+      digitalWrite(PIN_LED, HIGH);
+      digitalWrite(PIN_RELAY_IN1, HIGH);
+      digitalWrite(PIN_RELAY_IN2, HIGH);
       isHeaterOn = true;
     } else if (!turnHeaterOn && isHeaterOnLast) {                  // turn heater off, when currently on
-      digitalWrite(8, LOW);
-      digitalWrite(2, LOW);
-      digitalWrite(3, LOW); 
+      digitalWrite(PIN_LED, LOW);
+      digitalWrite(PIN_RELAY_IN1, LOW);
+      digitalWrite(PIN_RELAY_IN2, LOW); 
       isHeaterOn = false;
     }
-    lastSampleTime += STATE_CHANGE_DELAY;
+    lastSampleTime += POLLING_DELAY;
+    isHeaterOnLast = isHeaterOn;
   }
-  isHeaterOnLast = isHeaterOn;
+  
 }
 
 
